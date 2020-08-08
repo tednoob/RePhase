@@ -237,6 +237,13 @@ class Particle:
             l += 1
         return l
 
+    @property
+    def duration(self):
+        time, _, _ = self.line()
+        if time:
+            return time[-1]-time[0]
+        return 0
+
     def line(self):
         times = []
         frequencies = []
@@ -245,7 +252,7 @@ class Particle:
         while step is not None:
             times.append(step.time)
             frequencies.append(step.frequency)
-            amplitudes.append(step.amplitude)
+            amplitudes.append(step.smooth_amplitude)
             step = step.next
         return times, frequencies, amplitudes
 
@@ -291,10 +298,10 @@ class Particle:
         plt.plot(plot_times, frequency)
 
 
-def filter_particles(particles, length=10):
+def filter_particles(particles, duration=0.1, minlen=5):
     all_particles = []
     for particle in particles:
-        if len(particle) >= length:
+        if particle.duration >= duration and len(particle) >= minlen:
             all_particles.append(particle)
     return all_particles
 
@@ -364,7 +371,12 @@ def find_particles(segments, step_size=5, amplitude_limit=0.05, opt_log10=False,
                     particles.append(min_prev)
         prev_particles = new_particles
 
-    particles = filter_particles(particles, 10)
+    return particles
+    
+
+def rebuild_signal(segments, amplitude_limit=0.01, step_size=20):
+    particles = find_particles(amplitude_limit=amplitude_limit, step_size=step_size)
+    particles = filter_particles(particles, 0.01)
 
     all_signals = np.zeros_like(t)
     for ix, particle in enumerate(particles):
@@ -393,10 +405,10 @@ def amplify_segments(segments):
     file_handle = output.export("D:\\output.mp3", format="mp3")
 
 
-DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\*.flac"
+#DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*skratt*.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Misc\\*.flac"
-#DATA_FILES_GLOB="E:\\sofus.wav"
+DATA_FILES_GLOB="E:\\monoton.flac"
 for file in iglob(DATA_FILES_GLOB):
     print(file)
     segments = AudioSegment.from_file(file, "flac")
@@ -405,6 +417,6 @@ for file in iglob(DATA_FILES_GLOB):
     #spectrogram(segments)
     #static_tones(segments)
     #remove_phase(segments)
-    find_particles(segments, amplitude_limit=0.01, step_size=1)
+    rebuild_signal(segments, amplitude_limit=0.01, step_size=20)
     #amplify_segments(segments)
     break
