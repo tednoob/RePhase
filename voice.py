@@ -22,6 +22,21 @@ def flatten(segments):
         output.extend(segment.get_array_of_samples())
     return np.array(output, dtype=np.int16)
 
+
+def to_segment(samples, frame_rate=48000, sample_width=2, channels=1):
+    """
+    data: raw audio data (bytes)
+    sample_width: 2 byte (16 bit) samples
+    frame_rate: samples per second
+    channels: Number of channels
+
+    """
+    data = samples.tobytes(order='C')
+    print(len(data))
+    print(frame_rate, sample_width, channels)
+    return AudioSegment(data=data, sample_width=sample_width, frame_rate=frame_rate, channels=channels)
+
+
 def amplify(data, window_size=24000):
     a = np.abs(data)
     data_len = len(data)
@@ -34,6 +49,32 @@ def amplify(data, window_size=24000):
         if tmp_max > 0:
             output[i] = 0.75*data[i]*np.iinfo(np.int16).max / tmp_max
     return output
+
+
+def transform(segments, opt_log10=False, opt_abs=True, opt_gaussian=None, nperseg=4096, noverlap=4000):
+    x = flatten(segments)
+    fs = segments.frame_rate
+    x = amplify(x, window_size=fs//2)
+    t = np.linspace(0, len(x)/segments.frame_rate, len(x))
+
+    # All of the audio clip
+    f1, t1, Zxx = scipy.signal.stft(x, fs, nperseg=nperseg, noverlap=noverlap)
+    if opt_abs:
+        Zxx = np.abs(Zxx)
+    if opt_log10:
+        Zxx = np.log10(Zxx)
+    if opt_gaussian is not None:
+        Zxx = scipy.ndimage.gaussian_filter(Zxx, opt_gaussian)
+
+    return t, f1, t1, Zxx
+
+
+def amplify_segments(segments):
+    x = flatten(segments)
+    x = amplify(x, window_size=24000)
+    output = to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
+    file_handle = output.export("D:\\output.mp3", format="mp3")
+
 
 def draw_fft(segments, x=None):
     if x is None:
@@ -51,6 +92,7 @@ def draw_fft(segments, x=None):
     plt.plot(freq[:N//2], np.abs(sp.real[:N//2]))
     plt.show()
 
+
 def spectrogram(segments, opt_log10=False, opt_show=True):
     """
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.spectrogram.html
@@ -59,42 +101,13 @@ def spectrogram(segments, opt_log10=False, opt_show=True):
     x = flatten(segments)
     fs = segments.frame_rate
     print(len(x)/fs, len(x), fs)
-    #f, t, Sxx = signal.spectrogram(x, fs, scaling='spectrum', nfft=4096)
-    #print(f.shape, t.shape, Sxx.shape)
-    #plt.pcolormesh(t, f, Sxx, shading='gouraud')
-    #plt.pcolormesh(t, f, np.log10(Sxx), shading='flat')
-    
-    f1, t1, Zxx = scipy.signal.stft(x, fs, nperseg=1024, noverlap=1016)
-    #t2, x2 = scipy.signal.istft(Zxx, fs)
+    t, f1, t1, Zxx = transform(segments, opt_log10=opt_log10, opt_abs=True)
 
-    Zxx = np.abs(Zxx)
-    if opt_log10:
-        Zxx = np.log10(Zxx)
     plt.pcolormesh(t1, f1, Zxx, shading='flat')
     plt.ylabel('Frequency [Hz]')
     plt.xlabel('Time [sec]')
     if opt_show:
         plt.show()
-
-
-def to_segment(samples, frame_rate=48000, sample_width=2, channels=1):
-    data = samples.tobytes(order='C')
-    print(len(data))
-    print(frame_rate, sample_width, channels)
-    # Advanced usage, if you have raw audio data:
-    return AudioSegment(
-        # raw audio data (bytes)
-        data=data,
-
-        # 2 byte (16 bit) samples
-        sample_width=sample_width,
-
-        # 44.1 kHz frame rate
-        frame_rate=frame_rate,
-
-        # stereo
-        channels=channels
-    )
 
 
 def play(segments):
@@ -305,24 +318,13 @@ def filter_particles(particles, duration=0.1, minlen=5):
             all_particles.append(particle)
     return all_particles
 
-def find_particles(segments, step_size=5, amplitude_limit=0.05, opt_log10=False, opt_gaussian=None, nperseg=4096, noverlap=4000, match_freq=50):
+
+def find_particles(f1, t1, Zxx, step_size=5, amplitude_limit=0.05, match_freq=50):
     """
     amplitude_limit = 0.3 is really cool with log10.
     opt_gaussian defaults to None but you can provide [t, f] to apply window size e.g [0, 100]
 
     """
-    x = flatten(segments)
-    fs = segments.frame_rate
-    x = amplify(x, window_size=fs//2)
-    t = np.linspace(0, len(x)/segments.frame_rate, len(x))
-
-    # All of the audio clip
-    f1, t1, Zxx = scipy.signal.stft(x, fs, nperseg=nperseg, noverlap=noverlap)
-    Zxx = np.abs(Zxx)
-    if opt_log10:
-        Zxx = np.log10(Zxx)
-    if opt_gaussian is not None:
-        Zxx = scipy.ndimage.gaussian_filter(Zxx, opt_gaussian)
 
     # Diagnostics
     frequency_precision = f1[1]-f1[0]
@@ -374,14 +376,18 @@ def find_particles(segments, step_size=5, amplitude_limit=0.05, opt_log10=False,
     return particles
     
 
-def rebuild_signal(segments, amplitude_limit=0.01, step_size=20):
-    particles = find_particles(amplitude_limit=amplitude_limit, step_size=step_size)
+def rebuild_signal(segments, amplitude_limit=0.01, step_size=1):
+    t, f1, t1, Zxx = transform(segments)
+    particles = find_particles(f1, t1, Zxx, amplitude_limit=amplitude_limit, step_size=step_size)
     particles = filter_particles(particles, 0.01)
 
     all_signals = np.zeros_like(t)
     for ix, particle in enumerate(particles):
         print(ix, len(particles))
-        all_signals += particle.interpolate(t)
+        try:
+            all_signals += particle.interpolate(t)
+        except:
+            pass
 
     all_signals = np.iinfo(np.int16).max * all_signals / np.max(np.abs(all_signals))
     all_signals = all_signals.astype("int16")
@@ -398,25 +404,132 @@ def rebuild_signal(segments, amplitude_limit=0.01, step_size=20):
     plt.show()
 
 
-def amplify_segments(segments):
+def find_base_frequency(segments, step_size=5, opt_log10=False, opt_gaussian=None, nperseg=4096, noverlap=4000, match_freq=50):
     x = flatten(segments)
-    x = amplify(x, window_size=24000)
-    output = to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
+    fs = segments.frame_rate
+    x = amplify(x, window_size=fs//2)
+    t = np.linspace(0, len(x)/segments.frame_rate, len(x))
+
+    # All of the audio clip
+    f1, t1, Zxx = scipy.signal.stft(x, fs, nperseg=nperseg, noverlap=noverlap)
+    Zxx = np.abs(Zxx)
+    if opt_log10:
+        Zxx = np.log10(Zxx)
+    if opt_gaussian is not None:
+        Zxx = scipy.ndimage.gaussian_filter(Zxx, opt_gaussian)
+
+    # Diagnostics
+    frequency_precision = f1[1]-f1[0]
+    print("".join(str(x) for x in ["Frequency precision: ", frequency_precision, "Hz"]))
+    #plt.pcolormesh(t1, f1, Zxx, shading='flat')
+    #plt.ylabel('Frequency [Hz]')
+    #plt.xlabel('Time [sec]')
+    #plt.show()
+
+    
+    times = []
+    frequencies = []
+    particles = []
+    prev_particles = []
+    amplitudes = []
+    smooth_amplitudes = []
+    
+    # Fixed i
+    i = len(t1)//5
+
+    print(i, len(t1))
+    time = t1[i]
+    raw_amp = Zxx[:, i]
+    amp = smooth(raw_amp)
+
+    max_amp_ix = find_max_ix(amp)
+    for amp_ix in max_amp_ix:
+        frequency = f1[amp_ix]
+        amplitude = raw_amp[amp_ix]
+        smooth_amplitude = amp[amp_ix]
+        times.append(time)
+        frequencies.append(frequency)
+        amplitudes.append(amplitude)
+        smooth_amplitudes.append(smooth_amplitude)
+    
+    def approx(k):
+        if k == 0:
+            return 0
+
+        guesses = k*range(1, 10)
+        
+        ret = 0
+        for guess in guesses:
+            ret += min(abs(frequencies-guess))
+
+        return ret
+
+    print(np.array(frequencies[1:-1])-np.array(frequencies[0:-2]))
+
+    #print(frequencies[0])
+    #x = np.linspace(100, 130, 10000)
+    #y = np.array([approx(k) for k in x])
+    #plt.plot(x, y)
+    #plt.show()
+    
+    plt.plot(f1, raw_amp, '-b')
+    plt.plot(f1, amp, '-r')
+    plt.plot(frequencies, amplitudes, 'bo')
+    plt.plot(frequencies, smooth_amplitudes, 'ro')
+    plt.show()
+
+
+def decode_image_from_stackexchange():
+    # Image from https://dsp.stackexchange.com/questions/47304/stft-computation
+
+    from PIL import Image
+    import PIL.ImageOps
+    Zxx = np.array(PIL.ImageOps.flip(PIL.ImageOps.invert(Image.open("D:\\so_sample.png").convert('L'))))
+    f1 = np.linspace(0, 4000, Zxx.shape[0])
+    t1 = np.linspace(0, 3, Zxx.shape[1])
+    t = np.linspace(0, 3, 3*16000)
+    print(Zxx.shape, f1.shape, t1.shape)
+
+    particles = find_particles(f1, t1, Zxx, amplitude_limit=0.05, step_size=1)
+    particles = filter_particles(particles, 0.01)
+
+    all_signals = np.zeros_like(t)
+    for ix, particle in enumerate(particles):
+        print(ix, len(particles))
+        try:
+            all_signals += particle.interpolate(t)
+        except:
+            pass
+
+    all_signals = np.iinfo(np.int16).max * all_signals / np.max(np.abs(all_signals))
+    all_signals = all_signals.astype("int16")
+    all_signals = amplify(all_signals)
+
+    output = to_segment(all_signals, 16000, 2, 1)
     file_handle = output.export("D:\\output.mp3", format="mp3")
+    print("output written")
 
+    #spectrogram(output, opt_show=False)
+    for ix, particle in enumerate(particles):
+        print(ix, len(particles))
+        particle.plot(t)
+    plt.show()
 
+DATA_FILES_GLOB="D:\\output*"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*skratt*.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Misc\\*.flac"
-DATA_FILES_GLOB="E:\\monoton.flac"
+#DATA_FILES_GLOB="E:\\monoton.flac"
 for file in iglob(DATA_FILES_GLOB):
     print(file)
-    segments = AudioSegment.from_file(file, "flac")
+    segments = AudioSegment.from_file(file, "mp3")
     #draw_fft(segments)
     #save(segments)
     #spectrogram(segments)
     #static_tones(segments)
     #remove_phase(segments)
-    rebuild_signal(segments, amplitude_limit=0.01, step_size=20)
+    #rebuild_signal(segments, amplitude_limit=0.01, step_size=20)
+    find_base_frequency(segments)
+    #decode_image_from_stackexchange()
     #amplify_segments(segments)
     break
