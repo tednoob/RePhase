@@ -3,6 +3,7 @@ from glob import iglob
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy
+import random
 from scipy import ndimage
 from scipy import signal
 from scipy import interpolate
@@ -216,9 +217,40 @@ def find_max_ix(vec, window_size=5):
     return ret
 
 
+def find_max_smooth(x_values, y_values, window_size=5):
+    vec = smooth(y_values, window_size=window_size)
+    y_max = np.max(y_values)
+    max_xs = []
+    max_ys = []
+    for ix in find_max_ix(vec, window_size=5):
+        if y_values[ix] > 0.01*y_max:
+            max_xs.append(x_values[ix])
+            max_ys.append(y_values[ix])
+    return max_xs, max_ys
+
+def find_max_interp(x_values, y_values, cutoff=None, min_x=20, max_x=2000, resolution=1):
+    y_fun = Spline(x_values, y_values)
+
+    x = np.linspace(min_x, max_x, int((max_x - min_x)/resolution))
+    y = np.array(list(y_fun(f) for f in x))
+    y_prime = np.array(list(y_fun.derivate(f) for f in x))
+
+    max_xs = []
+    max_ys = []
+    for i in range(1, len(y_prime)):
+        if np.sign(y_prime[i]) < np.sign(y_prime[i-1]):
+            x_tmp = x[i-1] + (x[i]-x[i-1])/2
+            y_tmp = y_fun(x_tmp)
+            if cutoff is None or y_tmp >= cutoff:
+                max_xs.append(x_tmp)
+                max_ys.append(y_tmp)
+
+    return max_xs, max_ys
+
+
 class Spline:
 
-    def __init__(self, x, y, s=4800):
+    def __init__(self, x, y, s=480):
         self.x = x
         self.y = y
         self.spl = scipy.interpolate.splrep(self.x, self.y, s=s)
@@ -237,11 +269,11 @@ class Spline:
 
 class Particle:
 
-    def __init__(self, time, frequency, amplitude, smooth_amplitude):
+    def __init__(self, time, frequency, amplitude, smooth_amplitude=None):
         self.time = time
         self.frequency = frequency
         self.amplitude = amplitude
-        self.smooth_amplitude = smooth_amplitude
+        self.smooth_amplitude = smooth_amplitude if smooth_amplitude is not None else amplitude
         self.prev=None
         self.next=None
 
@@ -276,29 +308,31 @@ class Particle:
         return times, frequencies, amplitudes
 
     def interpolate(self, times):
-        amplitude = np.zeros_like(times)
-        line_times, line_freqs, line_amps = self.line()
-        #freq = scipy.interpolate.interp1d(line_times, line_freqs, kind='cubic', fill_value="extrapolate")
-        #amp = scipy.interpolate.interp1d(line_times, line_amps, kind='cubic', fill_value="extrapolate")
-        freq = Spline(line_times, line_freqs)
-        amp = Spline(line_times, line_amps)
-        cum_arg = 0
-        first = True
-        cum_t = 0
-        for i, t in enumerate(times):
-            delta_t = t-cum_t
-            if t > line_times[0] and t < line_times[-1]:
-                f = freq(t)
-                a = amp(t)
-                if first:
-                    cum_arg = t*f
-                    first = False
-                else:
-                    cum_arg += f * delta_t
-                amplitude[i] = np.real(a*np.exp(cum_arg * 2 * np.pi * 1j))
-            cum_t += delta_t
-
-        return amplitude
+        try:
+            amplitude = np.zeros_like(times)
+            line_times, line_freqs, line_amps = self.line()
+            #freq = scipy.interpolate.interp1d(line_times, line_freqs, kind='cubic', fill_value="extrapolate")
+            #amp = scipy.interpolate.interp1d(line_times, line_amps, kind='cubic', fill_value="extrapolate")
+            freq = Spline(line_times, line_freqs)
+            amp = Spline(line_times, line_amps)
+            cum_arg = 0
+            first = True
+            cum_t = 0
+            for i, t in enumerate(times):
+                delta_t = t-cum_t
+                if t > line_times[0] and t < line_times[-1]:
+                    f = freq(t)
+                    a = amp(t)
+                    if first:
+                        cum_arg = t*f
+                        first = False
+                    else:
+                        cum_arg += f * delta_t
+                    amplitude[i] = np.real(a*np.exp(cum_arg * 2 * np.pi * 1j))
+                cum_t += delta_t
+            return amplitude
+        except:
+            return np.zeros_like(times)
 
     def plot(self, times):
         plot_times = []
@@ -314,7 +348,11 @@ class Particle:
                 plot_times.append(t)
                 frequency.append(freq(t))
                 amplitude.append(amp(t))
-        plt.plot(plot_times, frequency)
+
+        colors = "bgrcmykw"
+        color = random.choice(colors)
+        plt.plot(plot_times, frequency, '-' + color)
+        plt.plot(line_times, line_freqs, 'o' + color)
 
 
 def filter_particles(particles, duration=0.1, minlen=5):
@@ -325,34 +363,14 @@ def filter_particles(particles, duration=0.1, minlen=5):
     return all_particles
 
 
-def find_peaks(x_values, y_values, min_x=None, max_x=None, resolution=0.1):
-    if min_x is None:
-        min_x = x_values[0]
+def find_base_frequency(max_xs, max_ys, tolerance=0.01, guess=None):
 
-    if max_x is None:
-        max_x = x_values[-1]
-
-    y_fun = Spline(x_values, y_values)
-
-    x = np.linspace(min_x, max_x, int((max_x - min_x)/resolution))
-    y = np.array(list(y_fun(f) for f in x))
-    y_prime = np.array(list(y_fun.derivate(f) for f in x))
-
-    max_xs = []
-    max_ys = []
-    for i in range(1, len(y_prime)):
-        if np.sign(y_prime[i]) < np.sign(y_prime[i-1]):
-            x_tmp = x[i-1] + (x[i]-x[i-1])/2
-            max_xs.append(x_tmp)
-            max_ys.append(y_fun(x_tmp))
-
-    return max_xs, max_ys
-
-
-def find_base_frequency(max_xs, max_ys, tolerance=0.01):
     # This is shady and unreliable.
-    max_y = max(max_ys)
     base_freq = 1
+    if len(max_ys) == 0:
+        return base_freq
+    
+    max_y = max(max_ys)
     for i, _ in enumerate(max_xs):
         if max_ys[i] >= tolerance*max(max_ys):
             base_freq = max_xs[i]
@@ -360,7 +378,36 @@ def find_base_frequency(max_xs, max_ys, tolerance=0.01):
     return base_freq
 
 
-def find_particles(f1, t1, Zxx, step_size=5, amplitude_limit=0.05, match_freq=50):
+def find_peaks(x_values, y_values, min_x=20, max_x=2000, cutoff=None, resolution=0.1, harmonics=True, tolerance=0.1, base_guess=None):
+    if min_x is None:
+        min_x = x_values[0]
+
+    if max_x is None:
+        max_x = x_values[-1]
+
+
+    #max_xs, max_ys = find_max_interp(x_values, y_values, cutoff=cutoff, min_x=min_x, max_x=max_x, resolution=resolution)
+    max_xs, max_ys = find_max_smooth(x_values, y_values)
+    print(max_xs[0:2])
+
+    if not harmonics or len(max_xs) == 0:
+        return max_xs, max_ys
+
+    harm_xs = []
+    harm_ys = []
+    base_freq = find_base_frequency(max_xs, max_ys, tolerance=tolerance, guess=None)
+    for n in range(1, int(max_x/base_freq)):
+        freq = n*base_freq
+        harm_xs.append(freq)
+
+        tmp = np.abs(max_xs - freq)
+        index = tmp.argmin()
+        harm_ys.append(max_ys[index])
+    
+    return harm_xs, harm_ys
+
+
+def find_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.05, match_freq=50):
     """
     amplitude_limit = 0.3 is really cool with log10.
     opt_gaussian defaults to None but you can provide [t, f] to apply window size e.g [0, 100]
@@ -381,18 +428,24 @@ def find_particles(f1, t1, Zxx, step_size=5, amplitude_limit=0.05, match_freq=50
     particles = []
     prev_particles = []
     amplitude_criteria = amplitude_limit * np.max(Zxx)
+    guess = None
     for i in range(0, len(t1), step_size):
         print(i, len(t1))
         time = t1[i]
         new_particles = []
-        amp = smooth(Zxx[:, i])
-        max_amp_ix = find_max_ix(amp)
-        for amp_ix in max_amp_ix:
-            if amp[amp_ix] > amplitude_criteria:
-                frequency = f1[amp_ix]
+
+        # should be in a window
+        max_z = np.max(Zxx)
+        max_fs, max_amps = find_peaks(f1, Zxx[:, i], max_x=3000, cutoff=None, resolution=resolution, harmonics=False, base_guess=guess)
+        for ix, frequency in enumerate(max_fs):
+            amplitude = max_amps[ix]
+            if max_amps[ix] > amplitude_criteria:
                 times.append(time)
                 frequencies.append(frequency)
-                new_particles.append(Particle(time=time, frequency=frequency, amplitude=Zxx[amp_ix, i], smooth_amplitude=amp[amp_ix]))
+                new_particles.append(Particle(time=time, frequency=frequency, amplitude=amplitude))
+        if len(max_fs) > 0:
+            guess = max_fs[0]
+        print(len(new_particles))
 
         # Todo: improve complexity in matching
         new_particles.sort(key=lambda x: x.smooth_amplitude, reverse=True)
@@ -414,25 +467,28 @@ def find_particles(f1, t1, Zxx, step_size=5, amplitude_limit=0.05, match_freq=50
                     particles.append(min_prev)
         prev_particles = new_particles
 
+    plt.plot(times, frequencies, 'ro')
+    plt.show()
+
     return particles
-    
 
-def rebuild_signal(segments, amplitude_limit=0.01, step_size=1):
-    t, f1, t1, Zxx = transform(segments)
-    particles = find_particles(f1, t1, Zxx, amplitude_limit=amplitude_limit, step_size=step_size)
-    particles = filter_particles(particles, 0.01)
 
+def build_signal(t, particles):
     all_signals = np.zeros_like(t)
     for ix, particle in enumerate(particles):
         print(ix, len(particles))
-        try:
-            all_signals += particle.interpolate(t)
-        except:
-            pass
+        all_signals += particle.interpolate(t)
 
     all_signals = np.iinfo(np.int16).max * all_signals / np.max(np.abs(all_signals))
     all_signals = all_signals.astype("int16")
-    all_signals = amplify(all_signals)
+    return amplify(all_signals)
+
+
+def rebuild_signal(segments, amplitude_limit=0.01, step_size=1, resolution=0.01):
+    t, f1, t1, Zxx = transform(segments)
+    particles = find_particles(f1, t1, Zxx, amplitude_limit=amplitude_limit, step_size=step_size, resolution=resolution)
+    particles = filter_particles(particles, duration=0, minlen=4)
+    all_signals = build_signal(t, particles)
 
     output = to_segment(all_signals, segments.frame_rate, segments.sample_width, segments.channels)
     file_handle = output.export("D:\\output.mp3", format="mp3")
@@ -443,28 +499,6 @@ def rebuild_signal(segments, amplitude_limit=0.01, step_size=1):
         print(ix, len(particles))
         particle.plot(t)
     plt.show()
-
-
-def test_find_base_frequency(segments, step_size=5, opt_log10=False, opt_gaussian=None, nperseg=4096, noverlap=4000, match_freq=50):
-
-    t, f1, t1, Zxx = transform(segments, opt_log10=opt_log10, opt_gaussian=opt_gaussian, nperseg=nperseg, noverlap=noverlap)
-
-    # Diagnostics
-    frequency_precision = f1[1]-f1[0]
-    print("".join(str(x) for x in ["Frequency precision: ", frequency_precision, "Hz"]))
-
-    # Fixed i
-    i = len(t1)//5
-
-    raw_amp = Zxx[:, i]
-    plt.plot(f1, raw_amp, '-g')
-
-    max_xs, max_ys = find_peaks(f1, raw_amp)
-    plt.plot(max_xs, max_ys, 'bo')
-    plt.show()
-
-    base_freq = find_base_frequency(max_xs, max_ys)
-    print(base_freq)
 
 
 def decode_image_from_stackexchange():
@@ -478,16 +512,13 @@ def decode_image_from_stackexchange():
     t = np.linspace(0, 3, 3*16000)
     print(Zxx.shape, f1.shape, t1.shape)
 
-    particles = find_particles(f1, t1, Zxx, amplitude_limit=0.05, step_size=1)
-    particles = filter_particles(particles, 0.01)
+    particles = find_particles(f1, t1, Zxx, amplitude_limit=0, step_size=1)
+    #particles = filter_particles(particles, 0.01)
 
     all_signals = np.zeros_like(t)
     for ix, particle in enumerate(particles):
         print(ix, len(particles))
-        try:
-            all_signals += particle.interpolate(t)
-        except:
-            pass
+        all_signals += particle.interpolate(t)
 
     all_signals = np.iinfo(np.int16).max * all_signals / np.max(np.abs(all_signals))
     all_signals = all_signals.astype("int16")
@@ -503,6 +534,14 @@ def decode_image_from_stackexchange():
         particle.plot(t)
     plt.show()
 
+
+enable_profiling = False
+if enable_profiling:
+    import cProfile, pstats, io
+    from pstats import SortKey
+    pr = cProfile.Profile()
+    pr.enable()
+
 #DATA_FILES_GLOB="D:\\output*"
 DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*skratt*.flac"
@@ -516,8 +555,15 @@ for file in iglob(DATA_FILES_GLOB):
     #spectrogram(segments)
     #static_tones(segments)
     #remove_phase(segments)
-    #rebuild_signal(segments, amplitude_limit=0.01, step_size=20)
-    test_find_base_frequency(segments)
+    rebuild_signal(segments, amplitude_limit=0, step_size=5, resolution=1)
+    #test_find_base_frequency(segments)
     #decode_image_from_stackexchange()
     #amplify_segments(segments)
-    break
+
+if enable_profiling:
+    pr.disable()
+    s = io.StringIO()
+    sortby = SortKey.CUMULATIVE
+    ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+    ps.print_stats()
+    print(s.getvalue())
