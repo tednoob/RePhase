@@ -222,11 +222,17 @@ class Spline:
         self.x = x
         self.y = y
         self.spl = scipy.interpolate.splrep(self.x, self.y, s=s)
+        self.der = scipy.interpolate.splder(self.spl, 1)
 
     def __call__(self, x):
         if x < self.x[0] or x > self.x[-1]:
             return 0
         return scipy.interpolate.splev(x, self.spl)
+
+    def derivate(self, x):
+        if x < self.x[0] or x > self.x[-1]:
+            return 0
+        return scipy.interpolate.splev(x, self.der)
 
 
 class Particle:
@@ -319,6 +325,41 @@ def filter_particles(particles, duration=0.1, minlen=5):
     return all_particles
 
 
+def find_peaks(x_values, y_values, min_x=None, max_x=None, resolution=0.1):
+    if min_x is None:
+        min_x = x_values[0]
+
+    if max_x is None:
+        max_x = x_values[-1]
+
+    y_fun = Spline(x_values, y_values)
+
+    x = np.linspace(min_x, max_x, int((max_x - min_x)/resolution))
+    y = np.array(list(y_fun(f) for f in x))
+    y_prime = np.array(list(y_fun.derivate(f) for f in x))
+
+    max_xs = []
+    max_ys = []
+    for i in range(1, len(y_prime)):
+        if np.sign(y_prime[i]) < np.sign(y_prime[i-1]):
+            x_tmp = x[i-1] + (x[i]-x[i-1])/2
+            max_xs.append(x_tmp)
+            max_ys.append(y_fun(x_tmp))
+
+    return max_xs, max_ys
+
+
+def find_base_frequency(max_xs, max_ys, tolerance=0.01):
+    # This is shady and unreliable.
+    max_y = max(max_ys)
+    base_freq = 1
+    for i, _ in enumerate(max_xs):
+        if max_ys[i] >= tolerance*max(max_ys):
+            base_freq = max_xs[i]
+            break
+    return base_freq
+
+
 def find_particles(f1, t1, Zxx, step_size=5, amplitude_limit=0.05, match_freq=50):
     """
     amplitude_limit = 0.3 is really cool with log10.
@@ -404,79 +445,26 @@ def rebuild_signal(segments, amplitude_limit=0.01, step_size=1):
     plt.show()
 
 
-def find_base_frequency(segments, step_size=5, opt_log10=False, opt_gaussian=None, nperseg=4096, noverlap=4000, match_freq=50):
-    x = flatten(segments)
-    fs = segments.frame_rate
-    x = amplify(x, window_size=fs//2)
-    t = np.linspace(0, len(x)/segments.frame_rate, len(x))
+def test_find_base_frequency(segments, step_size=5, opt_log10=False, opt_gaussian=None, nperseg=4096, noverlap=4000, match_freq=50):
 
-    # All of the audio clip
-    f1, t1, Zxx = scipy.signal.stft(x, fs, nperseg=nperseg, noverlap=noverlap)
-    Zxx = np.abs(Zxx)
-    if opt_log10:
-        Zxx = np.log10(Zxx)
-    if opt_gaussian is not None:
-        Zxx = scipy.ndimage.gaussian_filter(Zxx, opt_gaussian)
+    t, f1, t1, Zxx = transform(segments, opt_log10=opt_log10, opt_gaussian=opt_gaussian, nperseg=nperseg, noverlap=noverlap)
 
     # Diagnostics
     frequency_precision = f1[1]-f1[0]
     print("".join(str(x) for x in ["Frequency precision: ", frequency_precision, "Hz"]))
-    #plt.pcolormesh(t1, f1, Zxx, shading='flat')
-    #plt.ylabel('Frequency [Hz]')
-    #plt.xlabel('Time [sec]')
-    #plt.show()
 
-    
-    times = []
-    frequencies = []
-    particles = []
-    prev_particles = []
-    amplitudes = []
-    smooth_amplitudes = []
-    
     # Fixed i
     i = len(t1)//5
 
-    print(i, len(t1))
-    time = t1[i]
     raw_amp = Zxx[:, i]
-    amp = smooth(raw_amp)
+    plt.plot(f1, raw_amp, '-g')
 
-    max_amp_ix = find_max_ix(amp)
-    for amp_ix in max_amp_ix:
-        frequency = f1[amp_ix]
-        amplitude = raw_amp[amp_ix]
-        smooth_amplitude = amp[amp_ix]
-        times.append(time)
-        frequencies.append(frequency)
-        amplitudes.append(amplitude)
-        smooth_amplitudes.append(smooth_amplitude)
-    
-    def approx(k):
-        if k == 0:
-            return 0
-
-        guesses = k*range(1, 10)
-        
-        ret = 0
-        for guess in guesses:
-            ret += min(abs(frequencies-guess))
-
-        return ret
-
-    print(np.array(frequencies[1:-1])-np.array(frequencies[0:-2]))
-
-    #print(frequencies[0])
-    #x = np.linspace(100, 130, 10000)
-    #y = np.array([approx(k) for k in x])
-    #plt.plot(x, y)
-    #plt.show()
-    
-    plt.plot(f1, raw_amp, '-b')
-    plt.plot(f1, amp, '-r')
-    plt.plot(frequencies, amplitudes, 'bo')
-    plt.plot(frequencies, smooth_amplitudes, 'ro')
+    max_xs, max_ys = find_peaks(f1, raw_amp)
+    plt.plot(max_xs, max_ys, 'bo')
     plt.show()
+
+    base_freq = find_base_frequency(max_xs, max_ys)
+    print(base_freq)
 
 
 def decode_image_from_stackexchange():
@@ -515,21 +503,21 @@ def decode_image_from_stackexchange():
         particle.plot(t)
     plt.show()
 
-DATA_FILES_GLOB="D:\\output*"
-#DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
+#DATA_FILES_GLOB="D:\\output*"
+DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*skratt*.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Misc\\*.flac"
 #DATA_FILES_GLOB="E:\\monoton.flac"
 for file in iglob(DATA_FILES_GLOB):
     print(file)
-    segments = AudioSegment.from_file(file, "mp3")
+    segments = AudioSegment.from_file(file, "flac")
     #draw_fft(segments)
     #save(segments)
     #spectrogram(segments)
     #static_tones(segments)
     #remove_phase(segments)
     #rebuild_signal(segments, amplitude_limit=0.01, step_size=20)
-    find_base_frequency(segments)
+    test_find_base_frequency(segments)
     #decode_image_from_stackexchange()
     #amplify_segments(segments)
     break
