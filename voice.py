@@ -55,7 +55,7 @@ def amplify(data, window_size=24000):
 def transform(segments, opt_log10=False, opt_abs=True, opt_gaussian=None, nperseg=4096, noverlap=4000):
     x = flatten(segments)
     fs = segments.frame_rate
-    x = amplify(x, window_size=fs//2)
+    x = amplify(x, window_size=fs)
     t = np.linspace(0, len(x)/segments.frame_rate, len(x))
 
     # All of the audio clip
@@ -252,9 +252,22 @@ def find_max_interp(x_values, y_values, cutoff=None, min_x=20, max_x=2000, resol
     return max_xs, max_ys
 
 
+def find_peaks(x_values, y_values, min_x=20, max_x=2000, cutoff=None, resolution=0.1,):
+    if min_x is None:
+        min_x = x_values[0]
+
+    if max_x is None:
+        max_x = x_values[-1]
+
+    max_xs, max_ys = find_max_interp(x_values, y_values, cutoff=cutoff, min_x=min_x, max_x=max_x, resolution=resolution)
+    #max_xs, max_ys = find_max_smooth(x_values, y_values)
+
+    return max_xs, max_ys
+
+
 class Spline:
 
-    def __init__(self, x, y, s=480):
+    def __init__(self, x, y, s=4800):
         self.x = x
         self.y = y
         self.spl = scipy.interpolate.splrep(self.x, self.y, s=s)
@@ -361,6 +374,7 @@ class Particle:
         except:
             pass
 
+
 def filter_particles(particles, duration=0.1, minlen=5):
     all_particles = []
     for particle in particles:
@@ -370,6 +384,8 @@ def filter_particles(particles, duration=0.1, minlen=5):
 
 
 def find_closest_index(vec, value):
+    if len(vec) == 0:
+        return None
     tmp = np.abs(vec - value)
     return tmp.argmin()
 
@@ -423,25 +439,13 @@ def find_base_binning(max_xs, max_ys, resolution=5, low_base=75, high_base=200, 
     return find_base_frequency(max_xs, max_ys)
 
 
-def find_peaks(x_values, y_values, min_x=20, max_x=2000, cutoff=None, resolution=0.1, harmonics=True, tolerance=0.1, base_guess=None):
-    if min_x is None:
-        min_x = x_values[0]
-
-    if max_x is None:
-        max_x = x_values[-1]
-
-
-    max_xs, max_ys = find_max_interp(x_values, y_values, cutoff=cutoff, min_x=min_x, max_x=max_x, resolution=resolution)
-    #max_xs, max_ys = find_max_smooth(x_values, y_values)
-
-    if not harmonics or len(max_xs) == 0:
-        return max_xs, max_ys
+def harmonic_peaks(max_xs, max_ys, max_x=2000, base_guess=None, tolerance=0.1, frequency_window=40):
 
     harm_xs = []
     harm_ys = []
+    harm_ix = []
     #base_freq = find_base_frequency(max_xs, max_ys, tolerance=tolerance, guess=None)
     base_freq = find_base_binning(max_xs, max_ys)
-
 
     low_ix = 0
     high_ix = 0
@@ -449,21 +453,25 @@ def find_peaks(x_values, y_values, min_x=20, max_x=2000, cutoff=None, resolution
 
     for n in range(1, int(max_x/base_freq)):
         freq = n*base_freq
-        amplitude = max_ys[find_closest_index(max_xs, freq)]
+        amplitude = 0
 
-        while low_ix < max_ix and max_xs[low_ix] < freq-20:
+        closest_index = find_closest_index(max_xs, freq)
+        if closest_index is not None:
+            amplitude = max_ys[closest_index]
+
+        while low_ix < max_ix and max_xs[low_ix] < freq-frequency_window/2:
             low_ix += 1
-        while high_ix < max_ix and max_xs[high_ix] < freq+20:
+        while high_ix < max_ix and max_xs[high_ix] < freq+frequency_window/2:
             high_ix += 1
         window = max_ys[low_ix:high_ix]
         win_len = len(window)
         if win_len > 0:
             amplitude = max(x for x in window)
-
         harm_xs.append(freq)
         harm_ys.append(amplitude)
+        harm_ix.append(n)
     
-    return harm_xs, harm_ys
+    return harm_xs, harm_ys, harm_ix
 
 
 def find_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.05, match_freq=50):
@@ -473,8 +481,6 @@ def find_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.0
 
     """
     
-    times = []
-    frequencies = []
     particles = []
     prev_particles = []
     amplitude_criteria = amplitude_limit * np.max(Zxx)
@@ -486,12 +492,12 @@ def find_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.0
 
         # should be in a window
         max_z = np.max(Zxx)
-        max_fs, max_amps = find_peaks(f1, Zxx[:, i], max_x=3000, cutoff=None, resolution=resolution, harmonics=False, base_guess=guess)
+        max_fs, max_amps = find_peaks(f1, Zxx[:, i], cutoff=None, resolution=resolution)
+        max_fs, max_amps, harmonic_index = harmonic_peaks(max_fs, max_amps, base_guess=guess)
+
         for ix, frequency in enumerate(max_fs):
             amplitude = max_amps[ix]
             if max_amps[ix] > amplitude_criteria:
-                times.append(time)
-                frequencies.append(frequency)
                 new_particles.append(Particle(time=time, frequency=frequency, amplitude=amplitude))
         if len(max_fs) > 0:
             guess = max_fs[0]
@@ -516,9 +522,51 @@ def find_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.0
                     particles.append(min_prev)
         prev_particles = new_particles
 
-    #plt.plot(times, frequencies, 'ro')
+    return particles
+
+
+def find_harmonic_particles(f1, t1, Zxx, resolution=0.1, step_size=5, amplitude_limit=0.05, match_freq=50):
+    """
+    amplitude_limit = 0.3 is really cool with log10.
+    opt_gaussian defaults to None but you can provide [t, f] to apply window size e.g [0, 100]
+
+    """
+    
+    particles = []
+    prev_particles = []
+    amplitude_criteria = amplitude_limit * np.max(Zxx)
+    guess = None
+    prev_particles = dict()
+    for i in range(0, len(t1), step_size):
+        print(i, len(t1))
+        time = t1[i]
+        new_particles = []
+
+        # should be in a window
+        max_z = np.max(Zxx)
+        max_fs, max_amps = find_peaks(f1, Zxx[:, i], cutoff=None, resolution=resolution)
+        #max_fs, max_amps, harmonic_index = harmonic_peaks(max_fs, max_amps, max_x=2000, base_guess=guess)
+        
+        new_particles = dict()
+        for ix, frequency in enumerate(max_fs):
+            amplitude = max_amps[ix]
+            if amplitude < amplitude_limit*max_z:
+                continue
+            
+            hix = harmonic_index[ix]
+            p = Particle(time, frequency, amplitude)
+            new_particles[hix] = p
+            prev_p = prev_particles.get(hix, None)
+            if prev_p != None:
+                prev_p.next = p
+                p.prev = prev_p
+            else:
+                particles.append(p)
+
+        prev_particles=new_particles
 
     return particles
+
 
 
 def build_signal(t, particles):
@@ -534,17 +582,18 @@ def build_signal(t, particles):
 
 
 def rebuild_signal(segments, amplitude_limit=0.01, step_size=1, resolution=0.01):
+
     spectrogram(segments)
+
     t, f1, t1, Zxx = transform(segments)
+    #particles = find_harmonic_particles(f1, t1, Zxx, amplitude_limit=amplitude_limit, step_size=step_size, resolution=resolution)
     particles = find_particles(f1, t1, Zxx, amplitude_limit=amplitude_limit, step_size=step_size, resolution=resolution)
     particles = filter_particles(particles, duration=0, minlen=4)
     all_signals = build_signal(t, particles)
 
     output = to_segment(all_signals, segments.frame_rate, segments.sample_width, segments.channels)
-    #file_handle = output.export("D:\\output.mp3", format="mp3")
+    file_handle = output.export("D:\\output.mp3", format="mp3")
     print("output written")
-
-    plt.show()
 
     spectrogram(output, opt_show=False)
     for ix, particle in enumerate(particles):
@@ -610,7 +659,7 @@ def test_particle():
     t = np.linspace(t_start, t_end, int((t_end-t_start)*sample_rate))
     all_signals = build_signal(t, particles)
     segments = to_segment(all_signals, sample_rate, 2, 1)
-    rebuild_signal(segments, amplitude_limit=0, step_size=5, resolution=1)
+    rebuild_signal(segments, amplitude_limit=0.05, step_size=5, resolution=1)
 
 
 enable_profiling = False
@@ -622,7 +671,7 @@ if enable_profiling:
 
 #DATA_FILES_GLOB="D:\\output*"
 DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
-#DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*skratt*.flac"
+#DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Alekanderu\\*vad var det*.flac"
 #DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Misc\\*.flac"
 #DATA_FILES_GLOB="E:\\monoton.flac"
 for file in iglob(DATA_FILES_GLOB):
@@ -633,8 +682,8 @@ for file in iglob(DATA_FILES_GLOB):
     #spectrogram(segments)
     #static_tones(segments)
     #remove_phase(segments)
-    #rebuild_signal(segments, amplitude_limit=0, step_size=5, resolution=1)
-    test_particle()
+    rebuild_signal(segments, amplitude_limit=0.01, step_size=1, resolution=1)
+    #test_particle()
     #test_find_base_frequency(segments)
     #decode_image_from_stackexchange()
     #amplify_segments(segments)
