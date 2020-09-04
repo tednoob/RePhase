@@ -1,4 +1,3 @@
-from pydub import AudioSegment
 from glob import iglob
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,6 +8,9 @@ from scipy import signal
 from scipy import interpolate
 from scipy import fft
 
+import audio.segment as seg
+import audio.utils as utils
+
 # https://en.wikipedia.org/wiki/Short-time_Fourier_transform#Inverse_STFT
 # https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.istft.html
 # https://dsp.stackexchange.com/questions/9877/reconstruction-of-audio-signal-from-spectrogram
@@ -17,45 +19,10 @@ from scipy import fft
 # https://en.wikipedia.org/wiki/Spectral_density
 # https://en.wikipedia.org/wiki/Formant
 
-def flatten(segments):
-    output = []
-    for segment in segments:
-        output.extend(segment.get_array_of_samples())
-    return np.array(output, dtype=np.int16)
-
-
-def to_segment(samples, frame_rate=48000, sample_width=2, channels=1):
-    """
-    data: raw audio data (bytes)
-    sample_width: 2 byte (16 bit) samples
-    frame_rate: samples per second
-    channels: Number of channels
-
-    """
-    data = samples.tobytes(order='C')
-    print(len(data))
-    print(frame_rate, sample_width, channels)
-    return AudioSegment(data=data, sample_width=sample_width, frame_rate=frame_rate, channels=channels)
-
-
-def amplify(data, window_size=24000):
-    a = np.abs(data)
-    data_len = len(data)
-    output = np.zeros_like(a)
-    for i in range(data_len):
-        window_start = max(i-window_size//2, 0)
-        window_end = min(i+window_size//2, data_len-1)
-        tmp = a[window_start:window_end]
-        tmp_max = np.max(tmp)
-        if tmp_max > 0:
-            output[i] = 0.75*data[i]*np.iinfo(np.int16).max / tmp_max
-    return output
-
-
 def transform(segments, opt_log10=False, opt_abs=True, opt_gaussian=None, nperseg=4096, noverlap=4000):
-    x = flatten(segments)
+    x = seg.flatten(segments)
     fs = segments.frame_rate
-    x = amplify(x, window_size=fs)
+    x = utils.amplify(x, window_size=fs)
     t = np.linspace(0, len(x)/segments.frame_rate, len(x))
 
     # All of the audio clip
@@ -70,16 +37,9 @@ def transform(segments, opt_log10=False, opt_abs=True, opt_gaussian=None, nperse
     return t, f1, t1, Zxx
 
 
-def amplify_segments(segments):
-    x = flatten(segments)
-    x = amplify(x, window_size=24000)
-    output = to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
-    file_handle = output.export("D:\\output.mp3", format="mp3")
-
-
 def draw_fft(segments, x=None):
     if x is None:
-        x = flatten(segments)
+        x = seg.flatten(segments)
     N = len(x)
     #s = np.abs(scipy.fft.fft(x))[:N//2]
 
@@ -99,7 +59,7 @@ def spectrogram(segments, opt_log10=False, opt_show=True):
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.spectrogram.html
     
     """
-    x = flatten(segments)
+    x = seg.flatten(segments)
     fs = segments.frame_rate
     print(len(x)/fs, len(x), fs)
     t, f1, t1, Zxx = transform(segments, opt_log10=opt_log10, opt_abs=True)
@@ -112,12 +72,6 @@ def spectrogram(segments, opt_log10=False, opt_show=True):
     plt.xlabel('Time [sec]')
     if opt_show:
         plt.show()
-
-
-def play(segments):
-    from pydub import AudioSegment
-    from pydub.playback import play
-    play(segments)
 
 
 class Interpolater:
@@ -172,7 +126,7 @@ def static_tones(segments):
     a = np.iinfo(np.int16).max * 0.75 * a / np.max(np.abs(a))
     a = a.astype("int16")
 
-    output = to_segment(a, segments.frame_rate, segments.sample_width, segments.channels)
+    output = seg.to_segment(a, segments.frame_rate, segments.sample_width, segments.channels)
     spectrogram(output)
 
     file_handle = output.export("D:\\output.mp3", format="mp3")
@@ -183,23 +137,23 @@ def static_tones(segments):
 
 def remove_phase(segments):
     fs=segments.frame_rate
-    data = flatten(segments)
+    data = seg.flatten(segments)
     freq, times, Zxx = scipy.signal.stft(data, fs, nperseg=1024)
     t, x = scipy.signal.istft(np.abs(Zxx), fs)
     x = x.astype("int16")
-    output = to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
+    output = seg.to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
     file_handle = output.export("D:\\output.mp3", format="mp3")
 
 
 def save(segments):
     print(segments.sample_width, segments.frame_rate, segments.channels)
-    data = flatten(segments)
+    data = seg.flatten(segments)
     fs = segments.frame_rate
     _, _, Zxx = scipy.signal.stft(data, fs)
     t, x = scipy.signal.istft(Zxx, fs)
     x = x.astype("int16")
     
-    output = to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
+    output = seg.to_segment(x, segments.frame_rate, segments.sample_width, segments.channels)
     file_handle = output.export("D:\\output.mp3", format="mp3")
 
 
@@ -578,7 +532,7 @@ def build_signal(t, particles):
 
     all_signals = np.iinfo(np.int16).max * all_signals / np.max(np.abs(all_signals))
     all_signals = all_signals.astype("int16")
-    return amplify(all_signals)
+    return utils.amplify(all_signals)
 
 
 def rebuild_signal(segments, amplitude_limit=0.01, step_size=1, resolution=0.01):
@@ -591,7 +545,7 @@ def rebuild_signal(segments, amplitude_limit=0.01, step_size=1, resolution=0.01)
     particles = filter_particles(particles, duration=0, minlen=4)
     all_signals = build_signal(t, particles)
 
-    output = to_segment(all_signals, segments.frame_rate, segments.sample_width, segments.channels)
+    output = seg.to_segment(all_signals, segments.frame_rate, segments.sample_width, segments.channels)
     file_handle = output.export("D:\\output.mp3", format="mp3")
     print("output written")
 
@@ -618,7 +572,7 @@ def decode_image_from_stackexchange():
 
     all_signals = build_signal(t, particles)
 
-    output = to_segment(all_signals, 16000, 2, 1)
+    output = seg.to_segment(all_signals, 16000, 2, 1)
     file_handle = output.export("D:\\output.mp3", format="mp3")
     print("output written")
 
@@ -658,7 +612,7 @@ def test_particle():
 
     t = np.linspace(t_start, t_end, int((t_end-t_start)*sample_rate))
     all_signals = build_signal(t, particles)
-    segments = to_segment(all_signals, sample_rate, 2, 1)
+    segments = seg.to_segment(all_signals, sample_rate, 2, 1)
     rebuild_signal(segments, amplitude_limit=0.05, step_size=5, resolution=1)
 
 
@@ -676,7 +630,7 @@ DATA_FILES_GLOB="D:\\Desktop\\soundboard\\Dahlgren\\jajjemen.flac"
 #DATA_FILES_GLOB="E:\\monoton.flac"
 for file in iglob(DATA_FILES_GLOB):
     print(file)
-    segments = AudioSegment.from_file(file, file.split(".")[-1])
+    segments = seg.read_file(file)
     #draw_fft(segments)
     #save(segments)
     #spectrogram(segments)
